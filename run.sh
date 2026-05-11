@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════════
+# AdStrike v5.0 «AdStrike» — Launcher
+# AUTHORISED PENETRATION TESTING ONLY
+# ══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+RED='\033[91m'; GRN='\033[92m'; YLW='\033[93m'
+CYN='\033[96m'; DIM='\033[2m';  RST='\033[0m'; BOLD='\033[1m'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/adrt_venv"
+MAIN="$SCRIPT_DIR/main.py"
+OUTPUT_DIR="$SCRIPT_DIR/output"
+LOG_FILE="$OUTPUT_DIR/session_$(date +%Y%m%d_%H%M%S).log"
+
+# Refuse sudo runs. User-installed tools commonly live in ~/.local/bin, and
+# root-owned output files can block subsequent normal-user runs.
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    echo "  [-] Do not launch this with sudo. Run as your normal user."
+    echo "      If output/ is currently root-owned from a previous sudo run, fix once with:"
+    echo "          sudo chown -R \$(id -un):\$(id -gn) \"$OUTPUT_DIR\""
+    exit 2
+fi
+
+ok()   { echo -e "  ${GRN}[+]${RST} $*"; }
+warn() { echo -e "  ${YLW}[!]${RST} $*"; }
+die()  { echo -e "  ${RED}[-]${RST} $* — aborting"; exit 1; }
+
+mkdir -p "$OUTPUT_DIR"
+
+# ── Python check ──────────────────────────────────────────────────────────────
+command -v python3 &>/dev/null || die "python3 not found"
+ok "Python $(python3 --version 2>&1 | awk '{print $2}')"
+
+# ── venv ─────────────────────────────────────────────────────────────────────
+if [[ ! -d "$VENV_DIR" ]]; then
+    warn "adrt_venv not found — run: bash install.sh"
+    exit 1
+fi
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+ok "Virtual environment activated"
+
+# ── .env ─────────────────────────────────────────────────────────────────────
+if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+    warn ".env not found — copying from template"
+    cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
+    warn "Edit .env with your engagement details, then re-run"
+    read -rp "  Press Enter to continue anyway (or Ctrl+C to abort)..."
+else
+    ok ".env loaded"
+fi
+
+# ── main.py check ─────────────────────────────────────────────────────────────
+[[ -f "$MAIN" ]] || die "main.py not found at $MAIN"
+
+# ── Launch ────────────────────────────────────────────────────────────────────
+echo -e "\n  ${DIM}Log → $LOG_FILE${RST}\n"
+
+cd "$SCRIPT_DIR"
+python3 main.py "$@" 2>&1 | tee -a "$LOG_FILE"
+EXIT_CODE=${PIPESTATUS[0]}
+
+echo
+if (( EXIT_CODE == 0 )); then
+    ok "Session ended cleanly — log saved → $LOG_FILE"
+else
+    warn "Exited with code $EXIT_CODE — log saved → $LOG_FILE"
+fi
