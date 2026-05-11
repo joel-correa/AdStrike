@@ -1,11 +1,6 @@
 <div align="center">
 
-<pre align="center"><code>     ___       __   _____ __       _ __       
-    /   | ____/ /  / ___// /______(_) /_____ 
-   / /| |/ __  /   \__ \/ __/ ___/ / //_/ _ \
-  / ___ / /_/ /   ___/ / /_/ /  / / ,< /  __/
- /_/  |_\__,_/   /____/\__/_/  /_/_/|_|\___/ 
-</code></pre>
+<img src="/assets/screenshots/ (1).png" alt="AdStrike banner" width="900">
 
 <h1>AdStrike &mdash; <code>v5.0 «AdStrike»</code></h1>
 <p><strong>Professional Active Directory Attack Framework</strong></p>
