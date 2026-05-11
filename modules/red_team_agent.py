@@ -10,18 +10,13 @@ Skills knowledge base loaded from:
 import os, sys, json, subprocess, shutil, re, time, secrets, string, base64, struct, shlex
 from pathlib import Path
 from datetime import datetime
+from types import SimpleNamespace
 
 try:
     import anthropic
     _HAS_ANTHROPIC = True
 except ImportError:
     _HAS_ANTHROPIC = False
-
-try:
-    import openai as _openai_lib
-    _HAS_OPENAI = True
-except ImportError:
-    _HAS_OPENAI = False
 
 from utils.helpers import (
     print_banner, section, success, warn, info, error, pause,
@@ -32,6 +27,53 @@ from utils.helpers import (
     _SYSPY, _IMP_DIR,
 )
 from config.settings import SESSION, OUTPUT_DIR, save_session, redact_obj, redact_text, SHOW_SECRETS
+
+
+def _ollama_chat_completion(model: str, messages: list, tools: list | None = None,
+                            tool_choice: str | None = None, temperature: float = 0.05,
+                            max_tokens: int | None = None):
+    """Call Ollama's local chat endpoint without extra AI SDK packages."""
+    import requests
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools is not None:
+        payload["tools"] = tools
+    if tool_choice:
+        payload["tool_choice"] = tool_choice
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+
+    resp = requests.post(
+        "http://127.0.0.1:11434/v1/chat/completions",
+        json=payload,
+        timeout=180,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    raw_msg = data["choices"][0].get("message", {})
+
+    tool_calls = []
+    for i, tc in enumerate(raw_msg.get("tool_calls") or []):
+        fn = tc.get("function") or {}
+        args = fn.get("arguments", "")
+        if not isinstance(args, str):
+            args = json.dumps(args)
+        tool_calls.append(SimpleNamespace(
+            id=tc.get("id") or f"call_{i}",
+            type=tc.get("type", "function"),
+            function=SimpleNamespace(name=fn.get("name", ""), arguments=args),
+        ))
+
+    msg = SimpleNamespace(
+        content=raw_msg.get("content") or "",
+        tool_calls=tool_calls,
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
 
 # Ensure impacket is importable (uses system python3 path, not venv)
 _IMPACKET_PYTHON = _SYSPY   # /usr/bin/python3 — has pip impacket in ~/.local
@@ -8524,8 +8566,8 @@ RULES:
 OLLAMA_SYSTEM = _build_ollama_system_prompt()
 
 
-def _tools_to_openai() -> list[dict]:
-    """Convert Anthropic tool format -> OpenAI function calling format."""
+def _tools_to_ollama() -> list[dict]:
+    """Convert Agent tool schemas into Ollama's function-calling format."""
     return [
         {
             "type": "function",
@@ -9220,17 +9262,12 @@ def _stable_args_signature(name: str, inputs: dict) -> str:
 def run_agent_ollama(target_ip: str, domain: str, username: str,
                      password: str = "", nt_hash: str = "",
                      model: str = "mistral"):
-    """Agent loop using Ollama (OpenAI-compatible API)."""
+    """Agent loop using Ollama's local OpenAI-compatible API."""
     _check_runtime_ownership()
-    if not _HAS_OPENAI:
-        error("openai package not found: pip install openai")
-        return
 
     # Proxy temizle
     for _k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"]:
         os.environ.pop(_k, None)
-
-    client = _openai_lib.OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="ollama")
 
     password = _real_secret(password)
     nt_hash = _real_nt_hash(nt_hash)
@@ -9259,7 +9296,7 @@ def run_agent_ollama(target_ip: str, domain: str, username: str,
             os.environ["KRB5CCNAME"] = _cc
             info(f"[Agent] Valid Kerberos ccache loaded: {_cc}")
 
-    oai_tools       = _tools_to_openai()
+    oai_tools       = _tools_to_ollama()
     ts              = datetime.now().strftime('%Y%m%d_%H%M%S')
     _clean_agent_output_for_new_run(ts)
     _runtime_path("agent_loot").mkdir(exist_ok=True)
@@ -9301,7 +9338,7 @@ def run_agent_ollama(target_ip: str, domain: str, username: str,
         round_num += 1
 
         try:
-            response = client.chat.completions.create(
+            response = _ollama_chat_completion(
                 model=model,
                 messages=messages,
                 tools=oai_tools,
@@ -9311,7 +9348,7 @@ def run_agent_ollama(target_ip: str, domain: str, username: str,
             )
         except Exception:
             try:
-                response = client.chat.completions.create(
+                response = _ollama_chat_completion(
                     model=model,
                     messages=messages,
                     tools=oai_tools,
@@ -10630,14 +10667,9 @@ def run():
             f"Do NOT call any tools — text only."
         )
         if use_ollama:
-            if not _HAS_OPENAI:
-                error("pip install openai")
-                pause()
-                return
             for _k in ["HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy","ALL_PROXY"]:
                 os.environ.pop(_k, None)
-            client = _openai_lib.OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="ollama")
-            resp = client.chat.completions.create(
+            resp = _ollama_chat_completion(
                 model=ollama_model,
                 messages=[{"role":"system","content":SYSTEM_PROMPT},
                           {"role":"user","content":plan_prompt}],
