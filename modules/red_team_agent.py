@@ -6056,21 +6056,21 @@ def tool_run_module(module_num: str, description: str = "") -> str:
 
 def tool_generate_report(engagement_name: str = "", summary: str = "") -> str:
     import importlib
-    SESSION["engagement"] = engagement_name or SESSION.get("engagement", "Agent-Run")
+    SESSION["engagement"] = engagement_name or SESSION.get("engagement") or "Agent-Run"
     try:
         mod = importlib.import_module("modules.reporting")
         importlib.reload(mod)
-        # Build findings summary
+        mod.pause = lambda *args, **kwargs: None
+        paths = mod.run() or {}
         findings = SESSION.get("findings", [])
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = f"/tmp/agent_report_{ts}"
-        from modules.reporting import SEV_ORDER, SEV_COLORS
         counts = {s: sum(1 for f in findings if f.get("severity") == s)
                   for s in ["Critical","High","Medium","Low","Info"]}
         return (f"Report ready: {len(findings)} findings\n"
                 f"Critical: {counts['Critical']} | High: {counts['High']} | "
                 f"Medium: {counts['Medium']} | Low: {counts['Low']}\n"
-                f"Run [40] from main menu to generate HTML/MD/JSON report")
+                f"HTML: {paths.get('html', 'output/reports/')}\n"
+                f"Markdown: {paths.get('markdown', 'output/reports/')}\n"
+                f"JSON: {paths.get('json', 'output/reports/')}")
     except Exception as e:
         return f"Report summary: {len(SESSION.get('findings',[]))} findings collected. {e}"
 
