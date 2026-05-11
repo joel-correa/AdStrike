@@ -10,10 +10,15 @@ RED='\033[91m'; GRN='\033[92m'; YLW='\033[93m'
 CYN='\033[96m'; DIM='\033[2m';  RST='\033[0m'; BOLD='\033[1m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/adrt_venv"
+VENV_DIR="${ADSTRIKE_VENV_DIR:-$SCRIPT_DIR/venv}"
 MAIN="$SCRIPT_DIR/main.py"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 LOG_FILE="$OUTPUT_DIR/session_$(date +%Y%m%d_%H%M%S).log"
+BIN_DIR="$SCRIPT_DIR/tools/bin"
+
+if [[ -d "$BIN_DIR" ]]; then
+    export PATH="$BIN_DIR:$PATH"
+fi
 
 # Refuse sudo runs. User-installed tools commonly live in ~/.local/bin, and
 # root-owned output files can block subsequent normal-user runs.
@@ -36,7 +41,7 @@ ok "Python $(python3 --version 2>&1 | awk '{print $2}')"
 
 # ── venv ─────────────────────────────────────────────────────────────────────
 if [[ ! -d "$VENV_DIR" ]]; then
-    warn "adrt_venv not found — run: bash install.sh"
+    warn "${VENV_DIR#$SCRIPT_DIR/} not found — run: python -m venv venv && source venv/bin/activate && bash install.sh"
     exit 1
 fi
 
@@ -61,7 +66,7 @@ fi
 echo -e "\n  ${DIM}Log → $LOG_FILE${RST}\n"
 
 cd "$SCRIPT_DIR"
-python3 main.py "$@" 2>&1 | tee -a "$LOG_FILE"
+"$VENV_DIR/bin/python" main.py "$@" 2>&1 | tee -a "$LOG_FILE"
 EXIT_CODE=${PIPESTATUS[0]}
 
 echo
