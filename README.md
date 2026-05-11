@@ -3,7 +3,7 @@
 <img src="/assets/screenshots/22.png" alt="AdStrike banner" width="900">
 
 <h1>AdStrike &mdash; <code>v5.0 «AdStrike»</code></h1>
-<p><strong>Professional Active Directory Attack Framework</strong></p>
+<p><strong>AI Powered Professional Active Directory Attack Framework</strong></p>
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Kali%20%7C%20Parrot-brightgreen?style=flat-square&logo=linux)](https://www.kali.org)
