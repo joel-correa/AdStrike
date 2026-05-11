@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="/assets/screenshots/ (1).png" alt="AdStrike banner" width="900" height="700">
+<img src="/assets/screenshots/ (1).png" alt="AdStrike banner" width="900">
 
 <h1>AdStrike &mdash; <code>v5.0 «AdStrike»</code></h1>
 <p><strong>Professional Active Directory Attack Framework</strong></p>
