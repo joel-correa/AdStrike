@@ -61,26 +61,46 @@ def run():
     bh_out_dir = os.path.join(_S.get("output_dir") or str(OUTPUT_DIR), "bloodhound")
     os.makedirs(bh_out_dir, exist_ok=True)
 
+    def _usable_secret(value):
+        value = str(value or "")
+        return value if value and value != "***" else ""
+
+    def _has_collection_auth():
+        nt_hash = _usable_secret(_S.get("nt_hash", ""))
+        ccache = _usable_secret(_S.get("krb5_ccache", ""))
+        password = _usable_secret(pw)
+        if not dom or not dc:
+            error("BloodHound collection requires DC IP and domain.")
+            return False
+        if not user:
+            error("BloodHound collection requires a username for authenticated LDAP collection.")
+            return False
+        if _S.get("use_kerberos") and ccache:
+            return True
+        if nt_hash or password:
+            return True
+        error("BloodHound collection requires a password, NT hash, or Kerberos ccache.")
+        info("Set credentials in Session Manager or run the AI Agent [51] with valid credentials first.")
+        return False
+
     def _bloodhound_base(prefix=""):
         dc_fqdn = _S.get("dc_fqdn", "")
         if dc_fqdn and dom and not str(dc_fqdn).lower().endswith("." + dom.lower()):
             warn(f"Ignoring stale DC FQDN '{dc_fqdn}' for active domain '{dom}'")
             dc_fqdn = ""
             _S["dc_fqdn"] = ""
-        nt_hash = _S.get("nt_hash", "")
-        ccache = _S.get("krb5_ccache", "")
+        nt_hash = _usable_secret(_S.get("nt_hash", ""))
+        ccache = _usable_secret(_S.get("krb5_ccache", ""))
+        password = _usable_secret(pw)
         use_kerberos = bool(_S.get("use_kerberos"))
 
-        if use_kerberos:
+        if use_kerberos and ccache:
             auth = f"-u {shell_quote(user)} -k -no-pass"
-            if ccache:
-                auth = f"KRB5CCNAME={shell_quote(ccache)} {prefix}bloodhound-python {auth}"
-            else:
-                auth = f"{prefix}bloodhound-python {auth}"
+            auth = f"KRB5CCNAME={shell_quote(ccache)} {prefix}bloodhound-python {auth}"
         elif nt_hash:
             auth = f"{prefix}bloodhound-python -u {shell_quote(user)} --hashes {shell_quote(':' + nt_hash.split(':')[-1])}"
         else:
-            auth = f"{prefix}bloodhound-python -u {shell_quote(user)} -p {shell_quote(pw)}"
+            auth = f"{prefix}bloodhound-python -u {shell_quote(user)} -p {shell_quote(password)}"
 
         cmd = f"{auth} -d {shell_quote(dom)} -ns {shell_quote(dc)} --dns-tcp --disable-autogc"
         if dc_fqdn:
@@ -117,6 +137,8 @@ def run():
     def _collect(collection, prefix=""):
         if not shutil.which("bloodhound-python"):
             error("bloodhound-python not found. Install with: pip install bloodhound")
+            return
+        if not _has_collection_auth():
             return
         prev_dir = os.getcwd()
         os.chdir(bh_out_dir)
