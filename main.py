@@ -373,7 +373,7 @@ def print_menu():
     print()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AUTO-DISCOVERY  —  nmap + LDAP + nxc ile hedefi tara
+#  AUTO-DISCOVERY  —  scan the target with nmap + LDAP + nxc
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Critical AD ports
