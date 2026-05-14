@@ -31,7 +31,8 @@ from config.settings import SESSION, OUTPUT_DIR, save_session, redact_obj, redac
 
 def _ollama_chat_completion(model: str, messages: list, tools: list | None = None,
                             tool_choice: str | None = None, temperature: float = 0.05,
-                            max_tokens: int | None = None):
+                            max_tokens: int | None = None,
+                            timeout: int | None = None):
     """Call Ollama's local chat endpoint without extra AI SDK packages."""
     import requests
 
@@ -51,7 +52,7 @@ def _ollama_chat_completion(model: str, messages: list, tools: list | None = Non
     resp = requests.post(
         "http://127.0.0.1:11434/v1/chat/completions",
         json=payload,
-        timeout=180,
+        timeout=timeout or OLLAMA_API_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -92,6 +93,14 @@ AGENT_RUNTIME_DIR.mkdir(exist_ok=True)
 AGENT_CLEAN_OUTPUT_ON_START = os.environ.get("AGENT_CLEAN_OUTPUT_ON_START", "true").lower() in ("1", "true", "yes", "on")
 AGENT_ARCHIVE_OLD_RUNS = os.environ.get("AGENT_ARCHIVE_OLD_RUNS", "true").lower() in ("1", "true", "yes", "on")
 AGENT_LIVE_COMMANDS = os.environ.get("ADSTRIKE_AGENT_LIVE_COMMANDS", "true").lower() in ("1", "true", "yes", "on")
+OLLAMA_API_TIMEOUT = int(os.environ.get("ADSTRIKE_OLLAMA_TIMEOUT", "60"))
+OLLAMA_MAX_TOOLS = max(1, int(os.environ.get("ADSTRIKE_OLLAMA_MAX_TOOLS", "1")))
+OLLAMA_SHOW_FALLBACK_WARNINGS = os.environ.get(
+    "ADSTRIKE_OLLAMA_SHOW_FALLBACK_WARNINGS", "false"
+).lower() in ("1", "true", "yes", "on")
+OLLAMA_FORCE_LLM_DECISION = os.environ.get(
+    "ADSTRIKE_OLLAMA_FORCE_LLM_DECISION", "false"
+).lower() in ("1", "true", "yes", "on")
 
 # ── OPSEC / Red Team settings ─────────────────────────────────────────────────
 # OPSEC_MODE: "loud"   — fast, no jitter, use all tools (labs/CTF)
@@ -8566,109 +8575,156 @@ def _session_context() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_ollama_system_prompt() -> str:
-    """Compact but skills-aware prompt for local models."""
-    # Build a condensed skills summary (top techniques only, fits local model context)
-    skill_lines = [
-        "## YOUR SKILLS (93 AD attack techniques — use these):",
-        "",
-    ]
-    for cat, techniques in sorted(SAST_SKILLS.items()):
-        crits = [t for t in techniques if t['severity'] in ('CRITICAL','HIGH')][:3]
-        if crits:
-            skill_lines.append(f"**{cat.upper()}:**")
-            for t in crits:
-                cmd = t['commands'][0][:90] if t['commands'] else ''
-                skill_lines.append(f"  • {t['title']} → `{cmd}`" if cmd else f"  • {t['title']}")
-            skill_lines.append("")
+    """Very small prompt for local models with 4096-token contexts."""
+    return """You are an authorized Active Directory red team agent.
+Mission: find the highest-impact path to Domain Admin and prove it with DCSync.
 
-    skills_compact = '\n'.join(skill_lines)
+Rules:
+- Always call exactly one available tool from the user's NEXT-ACTION MENU.
+- Do not invent tool names. Do not answer with text only.
+- Credentials are auto-injected by the framework; do not hardcode secrets.
+- Read the latest tool result and choose the highest-impact next action.
+- Do not repeat a completed or failed path unless the menu explicitly offers it.
 
-    return f"""You are an elite Active Directory red team operator on an authorized penetration test.
-Your mission: gain Domain Admin and prove the impact by dumping domain hashes.
+Priority guide:
+- DA membership, DA hash, or replication rights -> dcsync_attack, then report.
+- NT hash, valid credential, or ccache -> discover_winrm_access or evil_winrm.
+- WinRM shell confirmed -> windows_privesc_recon, credential_loot, jea_enum.
+- NTLM disabled or STATUS_NOT_SUPPORTED -> request_tgt before LDAP/ADCS/WinRM.
+- ADCS ESC finding -> adcs_scan with auto_exploit, then evil_winrm.
+- SPN accounts -> kerberoast. Pre-auth disabled users -> asrep_roast.
+- Readable shares -> auto_loot_chain to extract credentials.
+- ACL GenericWrite/GenericAll/WriteDACL/WriteOwner on gMSA ($) -> gmsa_takeover.
+- ForceChangePassword edge -> force_change_password_pivot.
+- GenericWrite on a computer -> rbcd_attack or shadow_credentials_attack.
+- No clear exploit -> enumerate_ldap, enumerate_shares, acl_abuse_scan, BloodHound.
 
-{OPERATOR_DOCTRINE}
-
-## HOW YOU THINK (after EVERY tool result)
-
-1. What did this tool find? (specific facts: users, SPNs, ESC numbers, hashes, ACL edges)
-2. What attack does this enable? (highest impact path)
-3. Call that tool NOW.
-
-## DECISION RULES
-
-NO CREDENTIALS (null session, external assessment):
-  → enumerate_ldap (anonymous) → kerbrute_enum (RID cycling) → asrep_roast (no-preauth users)
-  → timeroast → pre2k_attack → if creds obtained: pivot to authenticated path
-
-NTLM works (standard internal pentest):
-  → enumerate_ldap → enumerate_shares → laps_read → kerberoast/asrep_roast → adcs_scan → acl_abuse_scan
-
-NTLM disabled (Kerberos-only DC):
-  → request_tgt → enumerate_ldap → adcs_scan → evil_winrm (Kerberos)
-
-LARGE DOMAIN (10k+ users, corporate):
-  → enumerate_ldap (paged, 60s timeout) → trust_attack → user_hunt → bloodhound → acl paths
-  → Do NOT rely on password spray (lockout risk) — use kerberoast/shadow_credentials instead
-
-MULTI-DOMAIN / FOREST:
-  → enumerate_ldap → trust_attack → cross-forest kerberoast → ExtraSID child→parent
-
-Got NT hash or valid creds:
-  → discover_winrm_access → evil_winrm
-
-Got WinRM shell (Pwn3d!):
-  → windows_privesc_recon → credential_loot → jea_enum → lateral_movement
-
-ADCS ESC found:
-  → adcs_scan(auto_exploit=True) — auto-exploits and gets ccache
-  → immediately call evil_winrm with the new ccache
-
-SPN accounts:
-  → kerberoast → crack hash → test_credential → evil_winrm
-
-Pre-auth disabled:
-  → asrep_roast → crack hash → test_credential → evil_winrm
-
-GenericWrite on computer:
-  → shadow_credentials_attack OR rbcd_attack
-
-GenericWrite/GenericAll on gMSA ($):
-  → gmsa_takeover → evil_winrm with recovered NT hash
-
-Readable shares:
-  → auto_loot_chain → extract credentials → test_credential
-
-Unconstrained delegation computers found:
-  → unconstrained_delegation (shows exploitation steps)
-
-Legacy domain / old computers:
-  → pre2k_attack → timeroast → crack offline
-
-Domain Admin confirmed:
-  → dcsync_attack → generate_report → agent_complete(da_achieved)
-
-## KEY PRINCIPLES
-- Every domain is different — read tool results carefully before deciding
-- NTLM-enabled = try direct auth first; ADCS is optional
-- NTLM-disabled = Kerberos is mandatory; ADCS is the primary path
-- When shell obtained: collect credentials and pivot — that is the goal
-- When DA obtained: DCSync all hashes — that proves the impact
-
-{skills_compact}
-
-RULES:
-- ALWAYS call a tool — never respond with text only
-- Credentials are auto-injected — do not hardcode passwords in tool arguments
-- Failed tool = pivot to a different vector immediately
-- After shell: collect credentials, check for lateral movement paths, escalate to DA"""
+The rule engine supplies the valid menu. Pick one listed tool and call it."""
 
 
 # Short system prompt — local models can't handle long prompts
 OLLAMA_SYSTEM = _build_ollama_system_prompt()
 
 
-def _tools_to_ollama() -> list[dict]:
-    """Convert Agent tool schemas into Ollama's function-calling format."""
+def _compact_ollama_schema(schema: dict) -> dict:
+    """Return a small JSON schema; local models choke on verbose tool specs."""
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    compact = {"type": schema.get("type", "object")}
+    props = schema.get("properties") or {}
+    if isinstance(props, dict):
+        compact_props = {}
+        for key, value in props.items():
+            if not isinstance(value, dict):
+                compact_props[key] = {"type": "string"}
+                continue
+            item = {"type": value.get("type", "string")}
+            if "enum" in value:
+                item["enum"] = value["enum"]
+            if "default" in value:
+                item["default"] = value["default"]
+            if item["type"] == "array":
+                items = value.get("items") if isinstance(value.get("items"), dict) else {}
+                item["items"] = {"type": items.get("type", "string")}
+                if "enum" in items:
+                    item["items"]["enum"] = items["enum"]
+            compact_props[key] = item
+        compact["properties"] = compact_props
+    required = schema.get("required")
+    if isinstance(required, list) and required:
+        compact["required"] = required
+    return compact
+
+
+def _tool_to_ollama(tool: dict, compact: bool = False) -> dict:
+    """Convert one Agent tool schema into Ollama's function-calling format."""
+    desc = str(tool.get("description", ""))
+    if compact:
+        desc = desc.split(". ")[0].strip()
+        if len(desc) > 180:
+            desc = desc[:177].rstrip() + "..."
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": desc,
+            "parameters": (_compact_ollama_schema(tool["input_schema"])
+                           if compact else tool["input_schema"]),
+        }
+    }
+
+
+def _tools_to_ollama(tool_names: list[str] | None = None,
+                     compact: bool = False) -> list[dict]:
+    """Convert selected Agent tool schemas into Ollama's function-calling format."""
+    selected = set(tool_names or [])
+    tools = [t for t in TOOLS if not selected or t["name"] in selected]
+    return [
+        _tool_to_ollama(t, compact=compact)
+        for t in tools
+    ]
+
+
+def _ollama_candidate_tools(completed_tools: list,
+                            call_counts: dict = None,
+                            max_tools: int = 4) -> list[tuple[str, dict]]:
+    """Return a small next-action candidate set for Ollama.
+
+    The rule engine remains the source of truth. Ollama only chooses among a
+    tiny set of valid next actions instead of receiving every tool schema.
+    """
+    candidates: list[tuple[str, dict]] = []
+    seen: set = set()
+    exclude: set = set()
+    schema_names = {t["name"] for t in TOOLS}
+    for _ in range(max_tools):
+        try:
+            name, args = _pick_next_tool(
+                completed_tools, exclude=exclude, call_counts=call_counts)
+        except Exception:
+            name, args = "", {}
+        if not name or name in seen:
+            break
+        seen.add(name)
+        exclude.add(name)
+        if name in schema_names:
+            candidates.append((name, args or {}))
+    if not candidates:
+        candidates.append(("agent_complete", {
+            "status": "partial",
+            "summary": "No valid next action was available",
+        }))
+    return candidates
+
+
+def _ollama_candidate_menu(candidates: list[tuple[str, dict]]) -> str:
+    lines = ["NEXT-ACTION MENU (call exactly one listed tool):"]
+    for idx, (name, args) in enumerate(candidates, start=1):
+        command_hint = _command_preview_for_tool(name, args)[0]
+        lines.append(f"  {idx}. {name}  command≈{command_hint}")
+    return "\n".join(lines)
+
+
+def _trim_ollama_messages(messages: list, max_tail: int = 8) -> list:
+    """Keep local-model context small without losing the current state summary."""
+    if len(messages) <= max_tail + 2:
+        return messages
+    head = messages[:2]
+    tail = messages[2:][-max_tail:]
+    while tail and tail[0].get("role") == "tool":
+        tail = tail[1:]
+    return head + tail
+
+
+def _ollama_payload_size(messages: list, tools: list) -> int:
+    try:
+        return len(json.dumps({"messages": messages, "tools": tools}, default=str))
+    except Exception:
+        return 0
+
+
+def _tools_to_ollama_legacy() -> list[dict]:
+    """Convert all Agent tool schemas for backends that can handle full payloads."""
     return [
         {
             "type": "function",
@@ -9409,7 +9465,6 @@ def run_agent_ollama(target_ip: str, domain: str, username: str,
             os.environ["KRB5CCNAME"] = _cc
             info(f"[Agent] Valid Kerberos ccache loaded: {_cc}")
 
-    oai_tools       = _tools_to_ollama()
     ts              = datetime.now().strftime('%Y%m%d_%H%M%S')
     _clean_agent_output_for_new_run(ts)
     _runtime_path("agent_loot").mkdir(exist_ok=True)
@@ -9450,30 +9505,57 @@ def run_agent_ollama(target_ip: str, domain: str, username: str,
     while not agent_done and round_num < MAX_ROUNDS:
         round_num += 1
 
-        _agent_live_status(f"Round {round_num}: asking Ollama model '{model}' for next action...")
-        try:
-            response = _ollama_chat_completion(
-                model=model,
-                messages=messages,
-                tools=oai_tools,
-                tool_choice="required",
-                temperature=0.05,
-                max_tokens=512,
+        messages = _trim_ollama_messages(messages)
+        ollama_candidates = _ollama_candidate_tools(
+            completed_tools, call_counts=tool_call_counts, max_tools=OLLAMA_MAX_TOOLS)
+        oai_tools = _tools_to_ollama(
+            [name for name, _args in ollama_candidates], compact=True)
+        ollama_menu = _ollama_candidate_menu(ollama_candidates)
+        messages_for_llm = messages + [{
+            "role": "user",
+            "content": (
+                f"{ollama_menu}\n"
+                f"Completed: {list(dict.fromkeys(completed_tools))}\n"
+                f"State: {_session_context()}\n"
+                "Call exactly one available tool. Credentials are auto-injected."
             )
-        except Exception:
+        }]
+        if len(ollama_candidates) == 1 and not OLLAMA_FORCE_LLM_DECISION:
+            fallback_name, fallback_inputs = ollama_candidates[0]
+            _agent_live_status(
+                f"Round {round_num}: using rule engine next action: {fallback_name}")
+            response = SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(
+                    content="",
+                    tool_calls=[_make_fake_tc(fallback_name, fallback_inputs, round_num)],
+                )
+            )])
+        else:
+            payload_kb = _ollama_payload_size(messages_for_llm, oai_tools) // 1024
+            _agent_live_status(
+                f"Round {round_num}: asking Ollama model '{model}' for next action "
+                f"({len(oai_tools)} tools, payload≈{payload_kb} KB)...")
             try:
                 response = _ollama_chat_completion(
                     model=model,
-                    messages=messages,
+                    messages=messages_for_llm,
                     tools=oai_tools,
-                    tool_choice="auto",
+                    tool_choice="required",
                     temperature=0.05,
                     max_tokens=512,
                 )
-            except Exception as e2:
-                error(f"Ollama API error: {e2}")
-                warn("Is Ollama running? -> sudo systemctl start ollama")
-                break
+            except Exception as e1:
+                if OLLAMA_SHOW_FALLBACK_WARNINGS:
+                    warn(f"Ollama decision timed out/failed: {e1}")
+                fallback_name, fallback_inputs = _pick_next_tool(
+                    completed_tools, call_counts=tool_call_counts)
+                info(f"[Agent] Using rule engine next action: {fallback_name}")
+                response = SimpleNamespace(choices=[SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="",
+                        tool_calls=[_make_fake_tc(fallback_name, fallback_inputs, round_num)],
+                    )
+                )])
 
         msg        = response.choices[0].message
         tool_calls = list(msg.tool_calls or [])
