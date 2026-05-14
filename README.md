@@ -57,7 +57,7 @@ Core capabilities:
 
 <div align="center">
 
-![AdStrike Agent Demo](https://i.imgur.com/lvjEOEE.gif)
+<video src="https://github.com/user-attachments/assets/a133bfc3-d597-45d1-bf93-32a2b185b071" controls autoplay loop muted width="900"></video>
 
 AdStrike Agent in action — AI-assisted planning and full-auto tool orchestration against a live Active Directory target.<br>
 The agent autonomously selects modules, adapts to discovered evidence, and chains attack steps end-to-end.
