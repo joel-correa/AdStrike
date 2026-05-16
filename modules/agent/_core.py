@@ -51,6 +51,91 @@ from modules.agent.logger import AgentMarkdownLog
 _IMPACKET_PYTHON = _SYSPY  # /usr/bin/python3 — has pip impacket in ~/.local
 
 
+# ── Functions extracted from original lines 120-205 ──────────────────────────
+
+def _check_runtime_ownership() -> None:
+    """Refuse to run if the agent dirs were created by a previous root run.
+
+    Symptom: dirs owned by root:root with mode 755 block the regular user from
+    writing per-run reports, and bloodyAD invoked via root cannot import the
+    user-site bloodyAD package — both presented as cryptic mid-run failures.
+    """
+    import os as _os, sys as _sys
+    if _os.geteuid() == 0:
+        _sys.stderr.write(
+            "[FATAL] Do not run this agent with sudo.\n"
+            "        Tools like bloodyAD live in your user-site (~/.local/lib/...)\n"
+            "        and cannot be imported by root. Run as your normal user.\n"
+        )
+        _sys.exit(2)
+    bad = []
+    for _d in (LOG_DIR, AGENT_RUNTIME_DIR):
+        try:
+            _st = _os.stat(_d)
+            if _st.st_uid != _os.getuid() or not _os.access(_d, _os.W_OK):
+                bad.append(str(_d))
+        except FileNotFoundError:
+            continue
+    if bad:
+        _sys.stderr.write(
+            "[FATAL] Output dirs are owned by another user (likely a previous\n"
+            "        sudo run) — agent cannot write reports.\n"
+            "        Fix once with:\n"
+            f"          sudo chown -R $(id -u):$(id -g) {OUTPUT_DIR}\n"
+            f"        Affected: {bad}\n"
+        )
+        _sys.exit(2)
+
+
+def _clean_agent_output_for_new_run(run_id: str) -> None:
+    """Start each agent run with clean runtime state while preserving evidence."""
+    if not AGENT_CLEAN_OUTPUT_ON_START:
+        return
+
+    removed_runtime = 0
+    archived_logs   = 0
+
+    AGENT_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    for item in list(AGENT_RUNTIME_DIR.iterdir()):
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            removed_runtime += 1
+        except Exception as exc:
+            warn(f"[Agent cleanup] Could not remove runtime item {item}: {exc}")
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    old_logs = [
+        p for p in LOG_DIR.iterdir()
+        if p.is_file() and p.name.startswith("agent_") and p.suffix.lower() in {".md", ".json"}
+    ]
+    if old_logs:
+        if AGENT_ARCHIVE_OLD_RUNS:
+            archive_dir = LOG_DIR / "archive" / run_id
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            for path in old_logs:
+                try:
+                    shutil.move(str(path), str(archive_dir / path.name))
+                    archived_logs += 1
+                except Exception as exc:
+                    warn(f"[Agent cleanup] Could not archive log {path}: {exc}")
+        else:
+            for path in old_logs:
+                try:
+                    path.unlink()
+                    archived_logs += 1
+                except Exception as exc:
+                    warn(f"[Agent cleanup] Could not remove log {path}: {exc}")
+
+    if removed_runtime or archived_logs:
+        action = "archived" if AGENT_ARCHIVE_OLD_RUNS else "removed"
+        info(f"[Agent cleanup] runtime items removed={removed_runtime}, old logs {action}={archived_logs}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _real_secret(value: str) -> str:
     """Return a credential/hash only if it is not a redaction placeholder."""
     v = str(value or "").strip()
