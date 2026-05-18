@@ -383,7 +383,7 @@ echo "$KRB5CCNAME"
 ## AdStrike Agent
 
 AdStrike Agent is optional. Manual modules do not require AI.
-
+Try just agent : https://github.com/capture0x/AdAgent/
 Supported backends:
 
 | Backend | Use Case | Requirement |
