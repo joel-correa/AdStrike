@@ -380,16 +380,18 @@ echo "$KRB5CCNAME"
 
 ---
 
+
 ## AdStrike Agent
 
 AdStrike Agent is optional. Manual modules do not require AI.
-Try just agent : https://github.com/capture0x/AdAgent/
+Want to try just the agent? → **[github.com/capture0x/AdAgent](https://github.com/capture0x/AdAgent)**
+
 Supported backends:
 
 | Backend | Use Case | Requirement |
 |---|---|---|
-| Ollama | Local/private/offline lab usage | `ollama serve`, local model, Python `requests` |
-| Claude | API-backed reasoning | `ANTHROPIC_API_KEY`, internet/API access |
+| Ollama | Local / private / offline lab usage | `ollama serve`, local model, Python `requests` |
+| Claude | API-backed reasoning | `ANTHROPIC_API_KEY`, internet / API access |
 
 Ollama example:
 
