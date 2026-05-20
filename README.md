@@ -67,6 +67,8 @@ cd AdStrike
 chmod +x install.sh run.sh
 bash install.sh
 bash run.sh
+OR
+git clone https://github.com/capture0x/AdStrike.git && cd AdStrike && chmod +x install.sh run.sh && bash install.sh && bash run.sh
 ```
 
 Do not run `install.sh` or `run.sh` with `sudo`. The installer creates repo-local files such as `adrt_venv/`, `.env`, and `output/`; running as root can leave those files root-owned.
